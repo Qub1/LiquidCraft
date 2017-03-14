@@ -1,0 +1,10 @@
+<component name="ArtifactManager">
+  <artifact type="jar" name="LiquidCraft:jar">
+    <output-path>$PROJECT_DIR$/../Test/plugins-new</output-path>
+    <root id="archive" name="LiquidCraft.jar">
+      <element id="module-output" name="LiquidCraft" />
+      <element id="extracted-dir" path="$PROJECT_DIR$/../BuildTools/Spigot/Spigot-Server/target/spigot-1.11.2-R0.1-SNAPSHOT.jar" path-in-jar="/" />
+      <element id="extracted-dir" path="$PROJECT_DIR$/../BuildTools/Spigot/Spigot-API/target/spigot-api-1.11.2-R0.1-SNAPSHOT.jar" path-in-jar="/" />
+    </root>
+  </artifact>
+</component>
