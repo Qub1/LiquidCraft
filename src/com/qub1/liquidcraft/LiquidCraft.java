@@ -1,42 +1,247 @@
 package com.qub1.liquidcraft;
 
-import org.bukkit.Chunk;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
 import org.bukkit.craftbukkit.libs.jline.internal.Nullable;
-import org.bukkit.event.EventHandler;
-import org.bukkit.event.Listener;
-import org.bukkit.event.block.BlockFromToEvent;
-import org.bukkit.event.block.BlockPlaceEvent;
-import org.bukkit.event.world.ChunkLoadEvent;
-import org.bukkit.event.world.ChunkUnloadEvent;
-import org.bukkit.metadata.FixedMetadataValue;
 import org.bukkit.plugin.java.JavaPlugin;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Stack;
+import java.util.*;
+import java.util.stream.Collectors;
 
-public class LiquidCraft extends JavaPlugin implements Listener {
+// TODO: Add more event handlers
+// TODO: Check for and remove redundant event handlers
+// TODO: Divide liquid level over neighbors
+
+public class LiquidCraft extends JavaPlugin {
 	/**
-	 * The amount of blocks that have to be connected to a block for it to be an infinite source.
+	 * The amount of ticks between each flow.
 	 */
-	private static final int INFINITE_SOURCE_SIZE = 500000;
-	/**
-	 * The minimum amount of open air blocks connected to a target block for it to be considered as flowable (this is to simulate pressure).
-	 */
-	private static final int FLOW_MINIMUM_OPEN_AIR = 30;
+	private static final long TICKS_PER_FLOW = 4;
 
 	/**
-	 * The amount of liquid levels to flow per loop.
+	 * The highest liquid level.
 	 */
-	private static final int FLOW_SPEED = 1;
+	private static final int MAXIMUM_LIQUID_LEVEL = 8;
+
+	/**
+	 * The lowest liquid level.
+	 */
+	private static final int MINIMUM_LIQUID_LEVEL = 0;
 
 	/**
 	 * All active liquid blocks, cached.
 	 */
-	private List<Block> liquidBlocks = new ArrayList<>();
+	private Queue<Block> liquidBlocks = new LinkedList<>();
+
+	/**
+	 * Checks whether a two blocks are the same type of liquid.
+	 *
+	 * @param block1 The first block to compare.
+	 * @param block2 The second block to compare.
+	 * @return Whether the two blocks are the same type of liquid.
+	 */
+	public static boolean isSameLiquid(final Block block1, final Block block2) {
+		return isSameLiquid(block1.getType(), block2.getType());
+	}
+
+	/**
+	 * Checks whether a two materials are the same type of liquid. If one of the materials is AIR, they will match.
+	 *
+	 * @param material1 The first material to compare.
+	 * @param material2 The second material to compare.
+	 * @return Whether the two materials are the same type of liquid.
+	 */
+	public static boolean isSameLiquid(final Material material1, final Material material2) {
+		try {
+			return isLiquid(material1, true) && isLiquid(material2, true) && (material1 == Material.AIR || material2 == Material.AIR || LiquidType.fromMaterial(material1) == LiquidType.fromMaterial(material2));
+		} catch (Exception e) {
+			// This should not happen
+			e.printStackTrace();
+			return false;
+		}
+	}
+
+	/**
+	 * Gets the blocks with the lowest liquid level.
+	 *
+	 * @param blocks     The block to check.
+	 * @param liquidType The liquid type the blocks need to be.
+	 * @return The blocks with the lowest liquid level.
+	 */
+	public static List<Block> getLowestLiquidLevel(final List<Block> blocks, final LiquidType liquidType) {
+		int lowestLiquidLevel = -1;
+		List<Block> result = new ArrayList<>();
+
+		// Loop blocks and try to find the lowest one
+		for (Block block : blocks.stream().filter(o -> isLiquid(o, true) && isSameLiquid(o.getType(), liquidType.getValue())).collect(Collectors.toList())) {
+			// Try to get the block's liquid level
+			try {
+				int liquidLevel = getLiquidLevel(block);
+
+				// If the liquid level is lower than the lowest until now, clear the current results
+				if (liquidLevel < lowestLiquidLevel) {
+					result.clear();
+				}
+
+				// If there is no liquid level, or the current block is lower or equal to the results, add it
+				if (lowestLiquidLevel == -1 || liquidLevel <= lowestLiquidLevel) {
+					lowestLiquidLevel = liquidLevel;
+					result.add(block);
+				}
+			} catch (Exception e) {
+				// This shouldn't happen
+				e.printStackTrace();
+			}
+		}
+
+		return result;
+	}
+
+	/**
+	 * Checks whether the specified block can accept water.
+	 *
+	 * @param block The block to check.
+	 * @return Whether the block can accept water.
+	 */
+	public static boolean canAcceptWater(Block block) {
+		try {
+			return isLiquid(block, true) && getLiquidLevel(block) < MAXIMUM_LIQUID_LEVEL;
+		} catch (Exception e) {
+			return false; // Should never happen
+		}
+	}
+
+	/**
+	 * Checks if the specified block can flow to another block.
+	 *
+	 * @param block The block to check.
+	 * @return Whether the block can flow.
+	 */
+	public static boolean canFlow(Block block) {
+		try {
+			return isLiquid(block, false) && getLiquidLevel(block) > MINIMUM_LIQUID_LEVEL;
+		} catch (Exception e) {
+			// This should not happen
+			e.printStackTrace();
+			return false;
+		}
+	}
+
+	/**
+	 * Gets the horizontal neighbors around a block.
+	 *
+	 * @param block The block to check from.
+	 * @return The horizontal neighbors.
+	 */
+	public static List<Block> getHorizontalNeighbors(final Block block) {
+		List<Block> result = new ArrayList<>();
+
+		result.add(block.getRelative(BlockFace.NORTH));
+		result.add(block.getRelative(BlockFace.EAST));
+		result.add(block.getRelative(BlockFace.SOUTH));
+		result.add(block.getRelative(BlockFace.WEST));
+
+		return result;
+	}
+
+	/**
+	 * Gets the horizontal liquid neighbors around a block.
+	 *
+	 * @param block    The block to check from.
+	 * @param allowAir Whether to allow air.
+	 * @return The horizontal liquid neighbors.
+	 */
+	public static List<Block> getHorizontalLiquidNeighbors(final Block block, final boolean allowAir) {
+		return getHorizontalNeighbors(block).stream().filter(o -> isLiquid(o, allowAir)).collect(Collectors.toList());
+	}
+
+	/**
+	 * Gets the liquid neighbors around a block.
+	 *
+	 * @param block    The block to check from.
+	 * @param allowAir Whether to allow air.
+	 * @return The liquid neighbors.
+	 */
+	public static List<Block> getLiquidNeighbors(final Block block, final boolean allowAir) {
+		return getNeighbors(block).stream().filter(o -> isLiquid(o, allowAir)).collect(Collectors.toList());
+	}
+
+	/**
+	 * Gets the neighbors around a block.
+	 *
+	 * @param block The block to check from.
+	 * @return The neighbors.
+	 */
+	public static List<Block> getNeighbors(final Block block) {
+		List<Block> result = new ArrayList<>();
+
+		result.add(block.getRelative(BlockFace.UP));
+		result.add(block.getRelative(BlockFace.DOWN));
+		result.add(block.getRelative(BlockFace.NORTH));
+		result.add(block.getRelative(BlockFace.EAST));
+		result.add(block.getRelative(BlockFace.SOUTH));
+		result.add(block.getRelative(BlockFace.WEST));
+
+		return result;
+	}
+
+	/**
+	 * Checks whether the specified block is a liquid.
+	 *
+	 * @param block    The block to check.
+	 * @param allowAir Whether to allow air.
+	 * @return Whether the block is a liquid.
+	 */
+	public static boolean isLiquid(final Block block, final boolean allowAir) {
+		return isLiquid(block.getType(), allowAir);
+	}
+
+	/**
+	 * Checks whether the specified material is a liquid.
+	 *
+	 * @param material The material to check.
+	 * @param allowAir Whether to allow air.
+	 * @return Whether the material is a liquid.
+	 */
+	public static boolean isLiquid(final Material material, final boolean allowAir) {
+		return !(!allowAir && material == Material.AIR) && LiquidType.contains(material);
+	}
+
+	/**
+	 * Determines the liquid level of the specified block, where MINIMUM_LIQUID_LEVEL is the lowest level (air/empty) and MAXIMUM_LIQUID_LEVEL the highest (full).
+	 *
+	 * @param block The block to check.
+	 * @return The specified block's liquid level.
+	 * @throws Exception When the specified block is not a liquid.
+	 */
+	public static int getLiquidLevel(Block block) throws Exception {
+		// Check if the block is air
+		if (block.isEmpty()) {
+			// If so, the level is MINIMUM_LIQUID_LEVEL
+			return MINIMUM_LIQUID_LEVEL;
+		} else {
+			if (!isLiquid(block, false)) {
+				throw (new Exception("Block \"" + block.toString() + "\" is not a liquid"));
+			}
+
+			// Get block information
+			int rawLiquidLevel = block.getData();
+			boolean isFalling = rawLiquidLevel >= MAXIMUM_LIQUID_LEVEL;
+
+			// Check the liquid level
+			int level;
+			if (isFalling) {
+				// If the block is a source block or a falling block, the liquid level is the maximum
+				level = MAXIMUM_LIQUID_LEVEL;
+			} else {
+				// Otherwise, calculate the liquid level
+				level = MAXIMUM_LIQUID_LEVEL - rawLiquidLevel;
+			}
+
+			return level;
+		}
+	}
 
 	@Override
 	public void onDisable() {
@@ -47,275 +252,162 @@ public class LiquidCraft extends JavaPlugin implements Listener {
 		getLogger().info("Registering events...");
 
 		// Register event listeners
-		getServer().getPluginManager().registerEvents(this, this);
-
-		/*getLogger().info("Loading liquid blocks...");
-
-		// Now cache all currently loaded liquid blocks
-		// Loop all worlds
-		for (World world : getServer().getWorlds()) {
-			getLogger().info("Loading liquid blocks in \"" + world.getName() + "\"...");
-
-			// Loop all loaded chunks
-			for (Chunk chunk : world.getLoadedChunks()) {
-				loadChunkBlocks(chunk);
-			}
-		}*/
+		getServer().getPluginManager().registerEvents(new EventHandler(this), this);
 
 		getLogger().info("Registering scheduled tasks...");
 
 		// Register scheduled task
 		getServer().getScheduler().scheduleSyncRepeatingTask(this, () -> {
 			// First copy all current blocks, so as to loop through all blocks once per tick
-			List<Block> liquidBlocksToHandle = new ArrayList<>(liquidBlocks);
+			Queue<Block> liquidBlocksToHandle = new LinkedList<>(liquidBlocks);
 
 			// Process all blocks
-			for (Block block : liquidBlocksToHandle) {
-				try {
-					handleBlock(block);
-				} catch (Exception e) {
-					e.printStackTrace();
-					getLogger().warning("Could not process block: " + block.toString());
-					liquidBlocks.remove(block);
-				}
-			}
-		}, 1l, 1l);
-	}
+			while (!liquidBlocksToHandle.isEmpty()) {
+				Block block = liquidBlocksToHandle.remove();
+				liquidBlocks.remove();
 
-	@EventHandler
-	public void onChunkLoadEvent(ChunkLoadEvent event) {
-		//loadChunkBlocks(event.getChunk());
-	}
-
-	@EventHandler
-	public void onChunkUnloadEvent(ChunkUnloadEvent event) {
-		//unloadChunkBlocks(event.getChunk());
-	}
-
-	/**
-	 * Loads all liquid blocks in the specified chunk.
-	 *
-	 * @param chunk The chunk to load.
-	 */
-	private void loadChunkBlocks(Chunk chunk) {
-		// Loop all locations in the chunk
-		for (int x = 0; x < 16; ++x) {
-			for (int y = 0; y < 128; ++y) {
-				for (int z = 0; z < 16; ++z) {
-					// Get the block at the current location
-					Block block = chunk.getBlock(x, y, z);
-
-					// Handle the block
-					if (isLiquid(block)) {
-						liquidBlocks.add(block);
+				// Check if the block can still flow
+				if (canFlow(block)) {
+					// If so, handle it
+					try {
+						handleLiquidBlock(block);
+					} catch (Exception e) {
+						// This should not happen
+						e.printStackTrace();
 					}
 				}
 			}
-		}
+		}, TICKS_PER_FLOW, TICKS_PER_FLOW);
 	}
 
-	private void unloadChunkBlocks(Chunk chunk) {
-		// Loop all locations in the chunk
-		for (int x = 0; x < 16; ++x) {
-			for (int y = 0; y < 128; ++y) {
-				for (int z = 0; z < 16; ++z) {
-					// Get the block at the current location
-					Block block = chunk.getBlock(x, y, z);
+	public void addBlock(final Block block) {
+		// Add block and neighbors
+		if (isLiquid(block, false) && !liquidBlocks.contains(block)) {
+			liquidBlocks.add(block);
 
-					// Remove the block
-					if (isLiquid(block)) {
-						liquidBlocks.remove(block);
-					}
-				}
-			}
+			// Add all neighbors which are liquids
+			liquidBlocks.addAll(getNeighbors(block).stream().filter(o -> isLiquid(o, false) && !liquidBlocks.contains(o)).collect(Collectors.toList()));
 		}
 	}
 
 	/**
-	 * Checks whether the specified block is a liquid.
-	 *
-	 * @param block The block to check.
-	 * @return Whether the block is a liquid.
-	 */
-	private boolean isLiquid(Block block) {
-		return isLiquid(block.getType());
-	}
-
-	/**
-	 * Checks whether the specified material is a liquid.
-	 *
-	 * @param material The material to check.
-	 * @return Whether the material is a liquid.
-	 */
-	private boolean isLiquid(Material material) {
-		return LiquidType.contains(material);
-	}
-
-	@EventHandler
-	public void onBlockFromToEvent(BlockFromToEvent event) {
-		// Cancel any original liquid spread
-		if (isLiquid(event.getBlock())) {
-			event.setCancelled(true);
-
-			if (!liquidBlocks.contains(event.getBlock())) {
-				liquidBlocks.add(event.getBlock());
-			}
-		}
-	}
-
-	@EventHandler
-	public void onBlockPlaceEvent(BlockPlaceEvent event) {
-		if (isLiquid(event.getBlock()) && !liquidBlocks.contains(event.getBlock())) {
-			liquidBlocks.add(event.getBlock());
-		}
-	}
-
-	/**
-	 * Handles the specified block.
+	 * Handles the specified liquid block.
 	 *
 	 * @param block The block to handle.
-	 * @throws Exception
+	 * @throws Exception When the specified block cannot flow.
 	 */
-	private void handleBlock(Block block) throws Exception {
-		if (!isLiquid(block)) {
-			throw (new Exception("Block is not a liquid"));
+	private void handleLiquidBlock(Block block) throws Exception {
+		if (!canFlow(block)) {
+			throw (new Exception("Block \"" + block.toString() + "\" cannot flow"));
 		}
 
-		// Flow the specified amount of blocks
-		for (int i = 0; i < FLOW_SPEED; ++i) {
-			// Store destination block
-			Block destination;
+		// First, move as much water as possible downward
+		if (flowDown(block)) {
+			return;
+		}
 
-			if(getLiquidLevel(block.getRelative(BlockFace.DOWN)) < getLiquidLevel(block)) {
+		// Now divide the remaining water over the direct neighbors
+		if (flowHorizontally(block)) {
+			return;
+		}
 
-			}
+		// Now perform a flood fill algorithm, if the water wasn't completely divided yet
+		// TODO: Check if the cell below is full, and if so teleport the water to simulate pressure if there is an open air location lower and connected
+	}
 
-			if (destination == null || (getLiquidLevel(block) - getLiquidLevel(destination)) < 2) {
-				// If the destination doesn't exit or if it is too high to flow to, stop
-				break;
+	/**
+	 * Flows as much water as possible downward.
+	 *
+	 * @param block The block to flow down from.
+	 * @return A boolean telling us if we're done.
+	 * @throws Exception If the specified block is not a liquid.
+	 */
+	public boolean flowDown(Block block) throws Exception {
+		Block downBlock = block.getRelative(BlockFace.DOWN);
+
+		// Check if there is room
+		if (isSameLiquid(block, downBlock) && canAcceptWater(downBlock)) {
+			// Calculate how much room
+			int availableRoom = MAXIMUM_LIQUID_LEVEL - getLiquidLevel(downBlock);
+
+			// Check if we can move everything
+			if (availableRoom >= getLiquidLevel(block)) {
+				// If so, move everything and stop
+				flowLiquidFromTo(block, downBlock, getLiquidLevel(block));
+
+				return true;
 			} else {
-				// If not, flow
-				flowFromTo(block, destination, 1);
-			}
-		}
-	}
-
-	/**
-	 * Gets the neighbor with the lowest liquid level.
-	 *
-	 * @param block The block to check around.
-	 * @return The neighbor with the lowest liquid level, or null if there is none.
-	 */
-	private Block getLowestLiquidLevelNeighbor(Block block) {
-		int lowestLiquidLevel = -1;
-		Block result = null;
-
-		// Loop neighbors and try to find the lowest one
-		for (Block neighborBlock : getNeighbors(block)) {
-			// Try to get the neighbor's liquid level
-			try {
-				int neighborLiquidLevel = getLiquidLevel(neighborBlock);
-
-				if (lowestLiquidLevel == -1 || neighborLiquidLevel < lowestLiquidLevel) {
-					lowestLiquidLevel = neighborLiquidLevel;
-					result = neighborBlock;
-				}
-			} catch (Exception e) {
-				// Ignore
+				// If not, move what fits
+				flowLiquidFromTo(block, downBlock, availableRoom);
 			}
 		}
 
-		return result;
+		return false;
 	}
 
 	/**
-	 * Checks whether the liquid level of the specified block is at least the specified amount higher than all of its neighbors.
+	 * Flows as much water as possible to the horizontal neighbors.
 	 *
-	 * @param block  The block to check.
-	 * @param amount The amount the block needs to be higher than its neighbors.
-	 * @return Whether the block is at least the specified amount higher than all its neighbors.
-	 * @throws Exception
+	 * @param block The blow to flow from.
+	 * @return A boolean telling us if we're done.
+	 * @throws Exception If the specified block is not a liquid.
 	 */
-	private boolean isLiquidLevelHigherThanNeighbors(Block block, int amount) throws Exception {
-		int liquidLevel = getLiquidLevel(block);
+	public boolean flowHorizontally(Block block) throws Exception {
+		/*int totalLiquidLevel = 0;
+		List<Block> toDivide = new ArrayList<>();
+		toDivide.add(block);
+		toDivide.addAll(getHorizontalLiquidNeighbors(block, true));
 
-		// Loop neighbors
-		for (Block neighborBlock : getNeighbors(block)) {
-			// Attempt to get the neighbors liquid level
-			try {
-				// If the neighbor isn't at least the correct amount of levels lower, return false
-				if (getLiquidLevel(neighborBlock) > liquidLevel - amount) {
+		for (Block divideBlock : toDivide) {
+			// Add its liquid level
+			totalLiquidLevel += getLiquidLevel(divideBlock);
+		}
+
+		// Calculate the liquid level for each block and the remainder
+		int liquidLevelPerBlock = totalLiquidLevel / toDivide.size();
+		int remainingLiquidLevel = totalLiquidLevel % toDivide.size();
+
+		// Divide liquid
+		LiquidType liquidType = LiquidType.fromBlock(block);
+		for (Block divideBlock : toDivide) {
+			// Calculate the amount of remainder to add to this block
+			int remainderToAdd = 0;
+			if (remainingLiquidLevel > 0) {
+				// If we can add some remainder, do so
+				remainderToAdd = Math.min(MAXIMUM_LIQUID_LEVEL - liquidLevelPerBlock, remainingLiquidLevel);
+				remainingLiquidLevel -= remainderToAdd;
+			}
+
+			setLiquidLevel(divideBlock, liquidLevelPerBlock + remainderToAdd, liquidType);
+		}*/
+
+		while (true) {
+			// Get neighbors with lowest liquid level
+			List<Block> destinationBlocks = getLowestLiquidLevel(getHorizontalLiquidNeighbors(block, true), LiquidType.fromBlock(block));
+
+			// Check if there is one
+			if (destinationBlocks.size() > 0) {
+				// If so, pick a random one
+				Random random = new Random();
+				Block destinationBlock = destinationBlocks.get(random.nextInt(destinationBlocks.size()));
+
+				// Check if we can flow to it
+				int liquidLevelDifference = getLiquidLevel(block) - getLiquidLevel(destinationBlock);
+				if (liquidLevelDifference > 1) {
+					// If there is more than 1 difference in between the levels, simply flow and continue
+					flowLiquidFromTo(block, destinationBlock, 1);
+				} else if (liquidLevelDifference == 1) {
+					// If there is exactly one level difference, we couldn't equalize the water so we're not done
 					return false;
+				} else {
+					// If the other case the level difference was 0, which means we've successfully equalized the water so we're done
+					return true;
 				}
-			} catch (Exception e) {
-				// Ignore
+			} else {
+				// If not, we're not done
+				return false;
 			}
 		}
-
-		// If we're here, everything went well
-		return true;
-	}
-
-	/**
-	 * Checks whether the specified block is part of an "infinite" body of liquid.
-	 *
-	 * @param block The block to check.
-	 * @return Whether the block is part of an "infinite" body of liquid.
-	 */
-	private boolean isInfinite(Block block) {
-		if (isLiquid(block)) {
-			// The blocks that we've handled already
-			List<Block> handledBlocks = new ArrayList<>();
-			Stack<Block> blocksToHandle = new Stack<>();
-
-			// Add starting block
-			blocksToHandle.push(block);
-
-			while (blocksToHandle.size() > 0 && handledBlocks.size() < INFINITE_SOURCE_SIZE) {
-				Block currentBlock = blocksToHandle.pop();
-
-				// First set block as handled and increase connected
-				handledBlocks.add(currentBlock);
-
-				// Loop neighbors
-				for (Block neighborBlock : getNeighbors(currentBlock)) {
-					// Add to blocks to handle if not yet handled and correct type
-					if (!handledBlocks.contains(neighborBlock) && neighborBlock.getType() == block.getType()) {
-						blocksToHandle.add(neighborBlock);
-					}
-				}
-			}
-
-			return handledBlocks.size() >= INFINITE_SOURCE_SIZE;
-		} else {
-			return false;
-		}
-	}
-
-	/**
-	 * Gets all neighbors of the specified block.
-	 *
-	 * @param block The block whose neighbors to get.
-	 * @return The neighbors of the specified block.
-	 */
-	private List<Block> getNeighbors(Block block) {
-		List<Block> result = new ArrayList<>();
-
-		// Loop in a cube around the block
-		for (int x = block.getX() - 1; x <= block.getX() + 1; ++x) {
-			for (int y = block.getY() - 1; y <= block.getY() + 1; ++y) {
-				for (int z = block.getZ() - 1; z <= block.getZ() + 1; ++z) {
-					Block neighborBlock = block.getWorld().getBlockAt(x, block.getY(), z);
-
-					// Skip self
-					if (x != block.getX() && y != block.getY() && z != block.getZ()) {
-						result.add(neighborBlock);
-					}
-				}
-			}
-		}
-
-		return result;
 	}
 
 	/**
@@ -324,91 +416,63 @@ public class LiquidCraft extends JavaPlugin implements Listener {
 	 * @param sourceBlock The source block.
 	 * @param targetBlock The target block.
 	 * @param amount      The amount of liquid to flow.
-	 * @throws Exception
+	 * @throws Exception If the source can't flow or the target block can't receive.
 	 */
-	private void flowFromTo(Block sourceBlock, Block targetBlock, int amount) throws Exception {
-		if (!isLiquid(sourceBlock)) {
-			throw (new Exception("Source block is not a liquid"));
+	public void flowLiquidFromTo(Block sourceBlock, Block targetBlock, final int amount) throws Exception {
+		if (!isLiquid(sourceBlock, false)) {
+			throw (new Exception("Source block \"" + sourceBlock.toString() + "\" is not a liquid"));
 		}
 
 		if (!targetBlock.isEmpty() && LiquidType.fromMaterial(targetBlock.getType()) != LiquidType.fromMaterial(sourceBlock.getType())) {
-			throw (new Exception("Target block is not empty, not a liquid or not the correct liquid"));
+			throw (new Exception("Target block \"" + targetBlock.toString() + "\" is not empty, not a liquid or not the correct liquid"));
 		}
 
 		// Transact liquid
-		raiseLiquidLevel(targetBlock, amount, sourceBlock.getType());
-		lowerLiquidLevel(sourceBlock, amount, sourceBlock.getType());
+		LiquidType liquidType = LiquidType.fromBlock(sourceBlock);
+		lowerLiquidLevel(sourceBlock, amount, liquidType);
+		raiseLiquidLevel(targetBlock, amount, liquidType);
 	}
 
 	/**
-	 * @see com.qub1.liquidcraft.LiquidCraft#setLiquidLevel(Block, int, Material)
-	 */
-	private void setLiquidLevel(Block block, int level) throws Exception {
-		setLiquidLevel(block, level, null);
-	}
-
-	/**
-	 * Sets the liquid level of the specified block, where 0 is the lowest level (air/empty) and 8 the highest (full).
+	 * Sets the liquid level of the specified block, where MINIMUM_LIQUID_LEVEL is the lowest level (air/empty) and MAXIMUM_LIQUID_LEVEL the highest (full).
 	 *
 	 * @param block      The block to set.
 	 * @param level      The level to set.
 	 * @param liquidType The liquid type to set the block to.
-	 * @throws Exception
+	 * @throws Exception If the block is not a liquid, or if the liquid level is invalid.
 	 */
-	private void setLiquidLevel(Block block, int level, @Nullable Material liquidType) throws Exception {
-		if (level == 0) {
-			// Remove
-			liquidBlocks.remove(block);
-
-			// The block should be air
-			block.setType(Material.AIR);
-		} else {
-			// Check if the block is air
-			if (block.isEmpty()) {
-				// Check if the target type is non-null
-				if (liquidType == null) {
-					throw (new Exception("Cannot convert target block to liquid since no target liquid type is specified"));
-				}
-
-				// Then, check if the target type is a liquid
-				if (!isLiquid(liquidType)) {
-					throw (new Exception("Target material is not a liquid"));
-				}
-
-				// If the block is air, change it to the correct target type
-				block.setType(liquidType);
+	public void setLiquidLevel(Block block, final int level, @Nullable final LiquidType liquidType) throws Exception {
+		// Only do something if necessary
+		if (getLiquidLevel(block) != level) {
+			if (level < MINIMUM_LIQUID_LEVEL || level > MAXIMUM_LIQUID_LEVEL) {
+				throw (new Exception("Invalid liquid level \"" + level + "\""));
 			}
 
-			// Now check if the block's type is a liquid
-			if (isLiquid(block)) {
-				// If so, simply change the liquid level
-				byte rawLiquidLevel;
-				if (level > 8) {
-					rawLiquidLevel = 0;
-				} else {
-					rawLiquidLevel = (byte) (8 - level);
-				}
-				block.setData(rawLiquidLevel);
+			if (level == MINIMUM_LIQUID_LEVEL) {
+				// The block should be air
+				block.setType(Material.AIR);
 			} else {
-				// If the block is not air or the target type, throw an exception
-				throw (new Exception("Block is not of the correct liquid type"));
-			}
+				// Check if the block is air
+				if (block.isEmpty()) {
+					// Check if the target type is non-null
+					if (liquidType == null) {
+						throw (new Exception("Cannot convert target block \"" + block.toString() + "\" to liquid since no target liquid type is specified"));
+					}
 
-			// Add to handle list if not there
-			if(!liquidBlocks.contains(block)) {
-				liquidBlocks.add(block);
+					// If the block is air, change it to the correct target type
+					block.setType(liquidType.getValue());
+				}
+
+				// Stabilize block type
+				block.setType(LiquidType.fromBlock(block).getValue());
+
+				// If so, simply change the liquid level
+				block.setData((byte) (MAXIMUM_LIQUID_LEVEL - level));
+
+				// Add to handle list if not there
+				addBlock(block);
 			}
 		}
-
-		// Finally, store the metadata
-		block.setMetadata("Liquid level", new FixedMetadataValue(this, level));
-	}
-
-	/**
-	 * @see com.qub1.liquidcraft.LiquidCraft#raiseLiquidLevel(Block, int, Material)
-	 */
-	private void raiseLiquidLevel(Block block, int amount) throws Exception {
-		raiseLiquidLevel(block, amount, null);
 	}
 
 	/**
@@ -417,61 +481,10 @@ public class LiquidCraft extends JavaPlugin implements Listener {
 	 * @param block      The block to raise.
 	 * @param liquidType The liquid type to set the block to.
 	 * @param amount     The amount to raise.
-	 * @throws Exception
+	 * @throws Exception If the block is not a liquid.
 	 */
-	private void raiseLiquidLevel(Block block, int amount, Material liquidType) throws Exception {
+	public void raiseLiquidLevel(Block block, final int amount, final LiquidType liquidType) throws Exception {
 		setLiquidLevel(block, getLiquidLevel(block) + amount, liquidType);
-	}
-
-	/**
-	 * Determines the liquid level of the specified block, where 0 is the lowest level (air/empty) and 8 the highest (full).
-	 *
-	 * @param block The block to check.
-	 * @return The specified block's liquid level.
-	 * @throws Exception
-	 */
-	private int getLiquidLevel(Block block) throws Exception {
-		// Check if the block is air
-		if (block.isEmpty()) {
-			// If so, the level is 0
-			return 0;
-		} else {
-			if (!isLiquid(block)) {
-				throw (new Exception("Block is not a liquid"));
-			}
-
-			// Check if the block already has a level
-			if (!block.hasMetadata("Liquid level")) {
-				// If not, generate it
-
-				// Get block information
-				int rawLiquidLevel = block.getData();
-				boolean isFalling = rawLiquidLevel >= 8;
-
-				// Check the liquid level
-				int level;
-				if (isFalling) {
-					// If the block is a source block or a falling block, the liquid level is the maximum
-					level = 8;
-				} else {
-					// Otherwise, calculate the liquid level
-					level = 8 - rawLiquidLevel;
-				}
-
-				// Store it
-				block.setMetadata("Liquid level", new FixedMetadataValue(this, level));
-			}
-
-			// Retrieve the stored liquid level
-			return block.getMetadata("Liquid level").get(0).asInt();
-		}
-	}
-
-	/**
-	 * @see com.qub1.liquidcraft.LiquidCraft#lowerLiquidLevel(Block, int, Material)
-	 */
-	private void lowerLiquidLevel(Block block, int amount) throws Exception {
-		lowerLiquidLevel(block, amount, null);
 	}
 
 	/**
@@ -480,57 +493,9 @@ public class LiquidCraft extends JavaPlugin implements Listener {
 	 * @param block      The block to lower.
 	 * @param liquidType The liquid type to set the block to.
 	 * @param amount     The amount to lower.
-	 * @throws Exception
+	 * @throws Exception If the block is not a liquid.
 	 */
-	private void lowerLiquidLevel(Block block, int amount, Material liquidType) throws Exception {
+	public void lowerLiquidLevel(Block block, final int amount, final LiquidType liquidType) throws Exception {
 		setLiquidLevel(block, getLiquidLevel(block) - amount, liquidType);
-	}
-
-	/**
-	 * The Material types of liquids.
-	 */
-	private enum LiquidType {
-		WATER(Material.WATER),
-		LAVA(Material.LAVA);
-
-		private Material value;
-
-		LiquidType(Material value) {
-			this.value = value;
-		}
-
-		public static boolean contains(Material value) {
-			if (value == Material.STATIONARY_WATER || value == Material.STATIONARY_LAVA) {
-				return true;
-			}
-
-			for (LiquidType liquidType : values()) {
-				if (liquidType.getValue() == value) {
-					return true;
-				}
-			}
-
-			return false;
-		}
-
-		public Material getValue() {
-			return value;
-		}
-
-		public static LiquidType fromMaterial(Material value) throws Exception {
-			if (value == Material.STATIONARY_WATER) {
-				return LiquidType.WATER;
-			} else if (value == Material.STATIONARY_LAVA) {
-				return LiquidType.LAVA;
-			}
-
-			for (LiquidType liquidType : values()) {
-				if (liquidType.getValue() == value) {
-					return liquidType;
-				}
-			}
-
-			throw (new Exception("Invalid material"));
-		}
 	}
 }
