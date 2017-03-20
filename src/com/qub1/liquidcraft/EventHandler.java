@@ -1,5 +1,6 @@
 package com.qub1.liquidcraft;
 
+import org.bukkit.Material;
 import org.bukkit.block.Block;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockFromToEvent;
@@ -27,11 +28,13 @@ public class EventHandler implements Listener {
 	public void onBlockFromToEvent(BlockFromToEvent event) {
 		// Cancel any original liquid spread and add any spreading liquids to the list
 		final Block block = event.getBlock();
-		if (LiquidCraft.isLiquid(block, false)) {
+		final Block toBlock = event.getToBlock();
+		if (LiquidCraft.isLiquid(block, false) && LiquidCraft.isLiquid(toBlock, true)) {
 			event.setCancelled(true);
 		}
 
 		plugin.addBlock(block);
+		plugin.addBlock(toBlock);
 	}
 
 	@org.bukkit.event.EventHandler
@@ -50,7 +53,8 @@ public class EventHandler implements Listener {
 	public void onBlockPhysicsEvent(BlockPhysicsEvent event) {
 		// Cancel any liquid physics, since we handle those ourselves
 		final Block block = event.getBlock();
-		if (LiquidCraft.isLiquid(block, false)) {
+		final Material changedMaterial = event.getChangedType();
+		if (LiquidCraft.isLiquid(block, false) && LiquidCraft.isLiquid(changedMaterial, true)) {
 			event.setCancelled(true);
 		}
 
@@ -61,7 +65,8 @@ public class EventHandler implements Listener {
 	public void onBlockSpreadEvent(BlockSpreadEvent event) {
 		// Cancel any liquid spreading, since we handle those ourselves
 		final Block block = event.getBlock();
-		if (LiquidCraft.isLiquid(block, false)) {
+		final Block sourceBlock = event.getSource();
+		if (LiquidCraft.isLiquid(block, true) && LiquidCraft.isLiquid(sourceBlock, false)) {
 			event.setCancelled(true);
 		}
 

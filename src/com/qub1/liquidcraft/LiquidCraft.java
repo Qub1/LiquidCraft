@@ -1,9 +1,11 @@
 package com.qub1.liquidcraft;
 
+import com.qub1.liquidcraft.commandhandlers.MakeInfiniteSourceCommand;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
 import org.bukkit.craftbukkit.libs.jline.internal.Nullable;
+import org.bukkit.metadata.FixedMetadataValue;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.util.*;
@@ -12,6 +14,9 @@ import java.util.stream.Collectors;
 // TODO: Add more event handlers
 // TODO: Check for and remove redundant event handlers
 // TODO: Divide liquid level over neighbors
+// BUG: Sometimes liquids disappear when you remove the block next to them
+// BUG: Infinite blocks won't flow if there is 1 difference (apparently)
+// BUG: FlowToNearest gets slower if the body of water it is traversing is deeper
 
 public class LiquidCraft extends JavaPlugin {
 	/**
@@ -28,6 +33,12 @@ public class LiquidCraft extends JavaPlugin {
 	 * The lowest liquid level.
 	 */
 	private static final int MINIMUM_LIQUID_LEVEL = 0;
+
+	/**
+	 * How much liquid can flow from a block in one tick.
+	 * The default is one entire block of liquid (8 levels).
+	 */
+	private static final int FLOW_RATE = 8;
 
 	/**
 	 * All active liquid blocks, cached.
@@ -99,12 +110,12 @@ public class LiquidCraft extends JavaPlugin {
 	}
 
 	/**
-	 * Checks whether the specified block can accept water.
+	 * Checks whether the specified block can accept liquid.
 	 *
 	 * @param block The block to check.
-	 * @return Whether the block can accept water.
+	 * @return Whether the block can accept liquid.
 	 */
-	public static boolean canAcceptWater(Block block) {
+	public static boolean canAcceptLiquid(Block block) {
 		try {
 			return isLiquid(block, true) && getLiquidLevel(block) < MAXIMUM_LIQUID_LEVEL;
 		} catch (Exception e) {
@@ -120,7 +131,10 @@ public class LiquidCraft extends JavaPlugin {
 	 */
 	public static boolean canFlow(Block block) {
 		try {
-			return isLiquid(block, false) && getLiquidLevel(block) > MINIMUM_LIQUID_LEVEL;
+			boolean belowFlowRate = getFlowed(block) < FLOW_RATE;
+			boolean hasLiquid = getLiquidLevel(block) > MINIMUM_LIQUID_LEVEL;
+
+			return isLiquid(block, false) && belowFlowRate && hasLiquid;
 		} catch (Exception e) {
 			// This should not happen
 			e.printStackTrace();
@@ -243,6 +257,34 @@ public class LiquidCraft extends JavaPlugin {
 		}
 	}
 
+	/**
+	 * Checks if liquid can flow from the source block to the target block.
+	 *
+	 * @param from The source block.
+	 * @param to   The target block.
+	 * @return Whether liquid can flow from the source block to the target block.
+	 */
+	public static boolean canFlowFromTo(Block from, Block to) {
+		try {
+			boolean isDownBlock = to.equals(from.getRelative(BlockFace.DOWN));
+			boolean hasHorizontalPotential = getLiquidLevel(from) - getLiquidLevel(to) >= 2;
+
+			return canFlow(from) && canAcceptLiquid(to) && isSameLiquid(from, to) && (isDownBlock || hasHorizontalPotential);
+		} catch (Exception e) {
+			return false;
+		}
+	}
+
+	/**
+	 * Checks if the specified block is an infinite liquid source.
+	 *
+	 * @param block The block to check.
+	 * @return Whether the block is an infinite liquid source.
+	 */
+	public static boolean isInfiniteLiquidSource(Block block) {
+		return block.hasMetadata("Infinite") && block.getMetadata("Infinite").get(0).asBoolean();
+	}
+
 	@Override
 	public void onDisable() {
 	}
@@ -250,31 +292,27 @@ public class LiquidCraft extends JavaPlugin {
 	@Override
 	public void onEnable() {
 		getLogger().info("Registering events...");
-
-		// Register event listeners
 		getServer().getPluginManager().registerEvents(new EventHandler(this), this);
 
-		getLogger().info("Registering scheduled tasks...");
+		getLogger().info("Registering commands...");
+		getCommand("makeinfinitesource").setExecutor(new MakeInfiniteSourceCommand(this));
 
-		// Register scheduled task
+		getLogger().info("Registering scheduled tasks...");
 		getServer().getScheduler().scheduleSyncRepeatingTask(this, () -> {
+			getLogger().info("Processing " + new Integer(liquidBlocks.size()).toString() + " blocks...");
+
 			// First copy all current blocks, so as to loop through all blocks once per tick
 			Queue<Block> liquidBlocksToHandle = new LinkedList<>(liquidBlocks);
 
 			// Process all blocks
 			while (!liquidBlocksToHandle.isEmpty()) {
 				Block block = liquidBlocksToHandle.remove();
-				liquidBlocks.remove();
 
-				// Check if the block can still flow
-				if (canFlow(block)) {
-					// If so, handle it
-					try {
-						handleLiquidBlock(block);
-					} catch (Exception e) {
-						// This should not happen
-						e.printStackTrace();
-					}
+				try {
+					handleLiquidBlock(block);
+				} catch (Exception e) {
+					// This should not happen
+					e.printStackTrace();
 				}
 			}
 		}, TICKS_PER_FLOW, TICKS_PER_FLOW);
@@ -285,8 +323,52 @@ public class LiquidCraft extends JavaPlugin {
 		if (isLiquid(block, false) && !liquidBlocks.contains(block)) {
 			liquidBlocks.add(block);
 
-			// Add all neighbors which are liquids
-			liquidBlocks.addAll(getNeighbors(block).stream().filter(o -> isLiquid(o, false) && !liquidBlocks.contains(o)).collect(Collectors.toList()));
+			// Add all neighbors which are liquids and equal height or higher than the current block
+			liquidBlocks.addAll(getLiquidNeighbors(block, false).stream().filter(o -> !liquidBlocks.contains(o) && o.getY() >= block.getY()).collect(Collectors.toList()));
+		}
+	}
+
+	/**
+	 * Raises the amount of liquid that has flowed from the specified block.
+	 *
+	 * @param block  The block to set.
+	 * @param amount The amount to raise the flowed value by.
+	 */
+	private void raiseFlowed(Block block, int amount) {
+		setFlowed(block, getFlowed(block) + amount);
+	}
+
+	/**
+	 * Lowers the amount of liquid that has flowed from the specified block.
+	 *
+	 * @param block  The block to set.
+	 * @param amount The amount to lower the flowed value by.
+	 */
+	private void lowerFlowed(Block block, int amount) {
+		setFlowed(block, getFlowed(block) - amount);
+	}
+
+	/**
+	 * Sets the amount of liquid that has flowed from the specified block.
+	 *
+	 * @param block  The block to set.
+	 * @param amount The amount that has flowed.
+	 */
+	public void setFlowed(Block block, int amount) {
+		block.setMetadata("Flowed", new FixedMetadataValue(this, amount));
+	}
+
+	/**
+	 * Gets the amount of liquid that has flowed from a block in the current tick.
+	 *
+	 * @param block The block to check.
+	 * @return The amount of liquid that flowed from the specified block.
+	 */
+	public static int getFlowed(Block block) {
+		if (block.hasMetadata("Flowed")) {
+			return block.getMetadata("Flowed").get(0).asInt();
+		} else {
+			return 0;
 		}
 	}
 
@@ -297,26 +379,32 @@ public class LiquidCraft extends JavaPlugin {
 	 * @throws Exception When the specified block cannot flow.
 	 */
 	private void handleLiquidBlock(Block block) throws Exception {
-		if (!canFlow(block)) {
-			throw (new Exception("Block \"" + block.toString() + "\" cannot flow"));
+		// First, let's set the blocks flow rate to nothing
+		if(isLiquid(block, false)) {
+			setFlowed(block, 0);
 		}
 
-		// First, move as much water as possible downward
-		if (flowDown(block)) {
-			return;
+		// Check if the block can flow
+		if (canFlow(block)) {
+			// First, move as much liquid as possible downward
+			if (!flowDown(block)) {
+				// If we're not done, divide the remaining liquid over the direct neighbors
+				if(!flowHorizontally(block)) {
+					// If we're still not done, perform a flood fill algorithm
+					flowToNearest(block);
+				}
+			}
 		}
 
-		// Now divide the remaining water over the direct neighbors
-		if (flowHorizontally(block)) {
-			return;
+		// Check if anything flowed
+		if(getFlowed(block) == 0) {
+			// If not, remove the block from the handle list
+			liquidBlocks.remove(block);
 		}
-
-		// Now perform a flood fill algorithm, if the water wasn't completely divided yet
-		// TODO: Check if the cell below is full, and if so teleport the water to simulate pressure if there is an open air location lower and connected
 	}
 
 	/**
-	 * Flows as much water as possible downward.
+	 * Flows as much liquid as possible downward.
 	 *
 	 * @param block The block to flow down from.
 	 * @return A boolean telling us if we're done.
@@ -325,62 +413,23 @@ public class LiquidCraft extends JavaPlugin {
 	public boolean flowDown(Block block) throws Exception {
 		Block downBlock = block.getRelative(BlockFace.DOWN);
 
-		// Check if there is room
-		if (isSameLiquid(block, downBlock) && canAcceptWater(downBlock)) {
-			// Calculate how much room
-			int availableRoom = MAXIMUM_LIQUID_LEVEL - getLiquidLevel(downBlock);
-
-			// Check if we can move everything
-			if (availableRoom >= getLiquidLevel(block)) {
-				// If so, move everything and stop
-				flowLiquidFromTo(block, downBlock, getLiquidLevel(block));
-
-				return true;
-			} else {
-				// If not, move what fits
-				flowLiquidFromTo(block, downBlock, availableRoom);
-			}
+		// Move as much as possible downward
+		while (canFlowFromTo(block, downBlock)) {
+			flowLiquidFromTo(block, downBlock, 1);
 		}
 
-		return false;
+		// Check if we're done
+		return !canFlow(block);
 	}
 
 	/**
-	 * Flows as much water as possible to the horizontal neighbors.
+	 * Flows as much liquid as possible to the horizontal neighbors.
 	 *
 	 * @param block The blow to flow from.
 	 * @return A boolean telling us if we're done.
-	 * @throws Exception If the specified block is not a liquid.
+	 * @throws Exception If the source block is not a liquid.
 	 */
 	public boolean flowHorizontally(Block block) throws Exception {
-		/*int totalLiquidLevel = 0;
-		List<Block> toDivide = new ArrayList<>();
-		toDivide.add(block);
-		toDivide.addAll(getHorizontalLiquidNeighbors(block, true));
-
-		for (Block divideBlock : toDivide) {
-			// Add its liquid level
-			totalLiquidLevel += getLiquidLevel(divideBlock);
-		}
-
-		// Calculate the liquid level for each block and the remainder
-		int liquidLevelPerBlock = totalLiquidLevel / toDivide.size();
-		int remainingLiquidLevel = totalLiquidLevel % toDivide.size();
-
-		// Divide liquid
-		LiquidType liquidType = LiquidType.fromBlock(block);
-		for (Block divideBlock : toDivide) {
-			// Calculate the amount of remainder to add to this block
-			int remainderToAdd = 0;
-			if (remainingLiquidLevel > 0) {
-				// If we can add some remainder, do so
-				remainderToAdd = Math.min(MAXIMUM_LIQUID_LEVEL - liquidLevelPerBlock, remainingLiquidLevel);
-				remainingLiquidLevel -= remainderToAdd;
-			}
-
-			setLiquidLevel(divideBlock, liquidLevelPerBlock + remainderToAdd, liquidType);
-		}*/
-
 		while (true) {
 			// Get neighbors with lowest liquid level
 			List<Block> destinationBlocks = getLowestLiquidLevel(getHorizontalLiquidNeighbors(block, true), LiquidType.fromBlock(block));
@@ -392,16 +441,22 @@ public class LiquidCraft extends JavaPlugin {
 				Block destinationBlock = destinationBlocks.get(random.nextInt(destinationBlocks.size()));
 
 				// Check if we can flow to it
-				int liquidLevelDifference = getLiquidLevel(block) - getLiquidLevel(destinationBlock);
-				if (liquidLevelDifference > 1) {
+				if (canFlowFromTo(block, destinationBlock)) {
 					// If there is more than 1 difference in between the levels, simply flow and continue
 					flowLiquidFromTo(block, destinationBlock, 1);
-				} else if (liquidLevelDifference == 1) {
-					// If there is exactly one level difference, we couldn't equalize the water so we're not done
-					return false;
 				} else {
-					// If the other case the level difference was 0, which means we've successfully equalized the water so we're done
-					return true;
+					// If we can't, then we need to check if all liquid flowed or if there is some left
+					// Get the difference in levels
+					int liquidLevelDifference = getLiquidLevel(block) - getLiquidLevel(destinationBlock);
+
+					// Check if we're done
+					if (liquidLevelDifference == 0) {
+						// If the level difference is 0 we've successfully equalized the liquid so we're done
+						return true;
+					} else {
+						// If there is one or more levels difference we couldn't equalize the liquid so we're not done
+						return false;
+					}
 				}
 			} else {
 				// If not, we're not done
@@ -411,14 +466,75 @@ public class LiquidCraft extends JavaPlugin {
 	}
 
 	/**
+	 * Flows the block to the nearest block that can receive its flow without disrupting the balance.
+	 *
+	 * @param block The block to flow.
+	 * @throws Exception If the source block is not a liquid.
+	 */
+	public void flowToNearest(Block block) throws Exception {
+		// List of blocks that have been handled already
+		List<Block> handled = new ArrayList<>();
+
+		// List of blocks to handle in the first iteration (all direct neighbors which are lower or as high as the start block)
+		List<Block> toHandleNext = new ArrayList<>(getLiquidNeighbors(block, true).stream().filter(o -> o.getY() <= block.getY()).collect(Collectors.toList()));
+
+		// The current layer
+		int currentY = block.getY();
+
+		// Keep looping while there are blocks left to process
+		while (canFlow(block) && toHandleNext.size() > 0) {
+			// We need to copy the latest Y for use in lambda expressions
+			final int latestY = currentY;
+
+			// Get all blocks that we'll handle in this iteration
+			List<Block> toHandle = new ArrayList<>(toHandleNext.stream().filter(o -> o.getY() >= latestY).collect(Collectors.toList()));
+
+			// Check if the current layer still has blocks
+			if (toHandle.size() > 0) {
+				// If so, remove all blocks that we're handling from the wait list
+				toHandleNext.removeAll(toHandle);
+
+				// Shuffle the list that needs to be handled
+				// Since all blocks that need to be handled are direct neighbors of blocks which have been handled already, the flow distance remains the same
+				Collections.shuffle(toHandle);
+
+				// Handle all blocks in the current iteration
+				while (canFlow(block) && toHandle.size() > 0) {
+					// Get the next block to handle and remove it from the list
+					Block currentBlock = toHandle.remove(toHandle.size() - 1);
+
+					// Add the block to the handled list
+					handled.add(currentBlock);
+
+					// Check if the current block is an air block
+					// We need to check this, or else we get a chain reaction of air blocks adding air blocks
+					if (!currentBlock.isEmpty()) {
+						// If not, it's safe to add neighbors
+						// Add all neighbors which are not yet in any list and lower than the start block to the next iteration to be processed
+						toHandleNext.addAll(getLiquidNeighbors(currentBlock, true).stream().filter(o -> o.getY() <= block.getY() && !toHandleNext.contains(o) && !handled.contains(o)).collect(Collectors.toList()));
+					}
+
+					// Finally, check if we can flow to the current block, and if so, flow as much as possible
+					while (canFlowFromTo(block, currentBlock)) {
+						flowLiquidFromTo(block, currentBlock, 1);
+					}
+				}
+			} else {
+				// If not, we move on to the next layer
+				--currentY;
+			}
+		}
+	}
+
+	/**
 	 * Flows liquid from the specified source to the specified target.
 	 *
 	 * @param sourceBlock The source block.
 	 * @param targetBlock The target block.
-	 * @param amount      The amount of liquid to flow.
+	 * @param amount      The amount to flow.
 	 * @throws Exception If the source can't flow or the target block can't receive.
 	 */
-	public void flowLiquidFromTo(Block sourceBlock, Block targetBlock, final int amount) throws Exception {
+	public void flowLiquidFromTo(Block sourceBlock, Block targetBlock, int amount) throws Exception {
 		if (!isLiquid(sourceBlock, false)) {
 			throw (new Exception("Source block \"" + sourceBlock.toString() + "\" is not a liquid"));
 		}
@@ -427,10 +543,27 @@ public class LiquidCraft extends JavaPlugin {
 			throw (new Exception("Target block \"" + targetBlock.toString() + "\" is not empty, not a liquid or not the correct liquid"));
 		}
 
+		if (amount > FLOW_RATE - getFlowed(sourceBlock)) {
+			throw (new Exception("Flow exceeds flow rate"));
+		}
+
 		// Transact liquid
 		LiquidType liquidType = LiquidType.fromBlock(sourceBlock);
 		lowerLiquidLevel(sourceBlock, amount, liquidType);
 		raiseLiquidLevel(targetBlock, amount, liquidType);
+
+		// Raise flow rate
+		raiseFlowed(sourceBlock, amount);
+	}
+
+	/**
+	 * Sets whether the specified block is an infinite liquid source.
+	 *
+	 * @param block The block to set.
+	 * @param value Whether the block is an infinite liquid source.
+	 */
+	public void setInfiniteLiquidSource(Block block, boolean value) {
+		block.setMetadata("Infinite", new FixedMetadataValue(this, value));
 	}
 
 	/**
@@ -443,7 +576,8 @@ public class LiquidCraft extends JavaPlugin {
 	 */
 	public void setLiquidLevel(Block block, final int level, @Nullable final LiquidType liquidType) throws Exception {
 		// Only do something if necessary
-		if (getLiquidLevel(block) != level) {
+		// If the block is an infinite source, the level won't change
+		if (getLiquidLevel(block) != level && !isInfiniteLiquidSource(block)) {
 			if (level < MINIMUM_LIQUID_LEVEL || level > MAXIMUM_LIQUID_LEVEL) {
 				throw (new Exception("Invalid liquid level \"" + level + "\""));
 			}
@@ -468,11 +602,11 @@ public class LiquidCraft extends JavaPlugin {
 
 				// If so, simply change the liquid level
 				block.setData((byte) (MAXIMUM_LIQUID_LEVEL - level));
-
-				// Add to handle list if not there
-				addBlock(block);
 			}
 		}
+
+		// Add to handle list if not there
+		addBlock(block);
 	}
 
 	/**
